@@ -12,25 +12,24 @@ const ROOT = path.resolve(process.cwd(), "workspace");
 const MAX_STEPS = 40;
 
 const SYSTEM = `You are a practical autonomous coding agent working inside a project workspace.
-Your job is to turn the user's request into working code, not merely explain code.
-Use tools to inspect the workspace before changing it. Create/edit files, run commands, and verify your work.
-After implementation, audit the project for missing pieces, broken imports, obvious runtime/build issues, and incomplete requirements.
-Run the project's relevant checks (usually install/build/test) and fix failures. Repeat until the requested work is actually complete.
-Do not claim completion while known build/test errors remain. Keep changes focused on the user's request.
+Turn the user's request into working code, not merely an explanation.
+Inspect the workspace before changing it. Create/edit files, run commands, and verify your work.
+After implementation, audit for missing pieces, broken imports, obvious runtime/build issues, and incomplete requirements.
+Run relevant checks (usually install/build/test) and fix failures. Repeat until the requested work is complete.
+Do not claim completion while known build/test errors remain. Keep changes focused.
 The workspace root is the only filesystem area you should operate on. Prefer relative paths.
 `;
 
 type ToolCall = { id: string; name: string; input: Record<string, unknown> };
-
 type ToolResult = { id: string; result: string };
 
 const tools = [
   { name: "list_files", description: "List files/directories in a workspace directory.", input_schema: { type: "object", properties: { directory: { type: "string" } }, required: [] } },
   { name: "read_file", description: "Read a UTF-8 text file from the workspace.", input_schema: { type: "object", properties: { file_path: { type: "string" } }, required: ["file_path"] } },
   { name: "write_file", description: "Create or completely replace a UTF-8 text file in the workspace.", input_schema: { type: "object", properties: { file_path: { type: "string" }, content: { type: "string" } }, required: ["file_path", "content"] } },
-  { name: "edit_file", description: "Replace one exact text fragment in a file. Fails if the old text is not found exactly once.", input_schema: { type: "object", properties: { file_path: { type: "string" }, old_text: { type: "string" }, new_text: { type: "string" } }, required: ["file_path", "old_text", "new_text"] } },
+  { name: "edit_file", description: "Replace one exact text fragment in a file. Fails unless the old text occurs exactly once.", input_schema: { type: "object", properties: { file_path: { type: "string" }, old_text: { type: "string" }, new_text: { type: "string" } }, required: ["file_path", "old_text", "new_text"] } },
   { name: "search_files", description: "Search text recursively in workspace text files.", input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
-  { name: "run_command", description: "Run a shell command with the workspace as its working directory. Use this for installs, builds, tests, linting and other verification.", input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } }
+  { name: "run_command", description: "Run a shell command from the workspace. Use for installs, builds, tests, linting and debugging.", input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } }
 ];
 
 function safePath(p: string) {
@@ -46,9 +45,7 @@ async function listFiles(directory = ".") {
     .map(e => `${e.isDirectory() ? "[dir] " : "      "}${path.relative(ROOT, path.join(dir, e.name)) || "."}`).join("\n") || "(empty)";
 }
 
-async function readFile(filePath: string) {
-  return fs.readFile(safePath(filePath), "utf8");
-}
+async function readFile(filePath: string) { return fs.readFile(safePath(filePath), "utf8"); }
 
 async function writeFile(filePath: string, content: string) {
   const target = safePath(filePath);
@@ -68,7 +65,7 @@ async function editFile(filePath: string, oldText: string, newText: string) {
 
 async function searchFiles(query: string) {
   const results: string[] = [];
-  async function walk(dir: string) {
+  async function walk(dir: string): Promise<void> {
     for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
       if (["node_modules", ".git", "dist", ".next"].includes(entry.name)) continue;
       const full = path.join(dir, entry.name);
@@ -118,8 +115,7 @@ class GeminiProvider {
         contents: history,
         config: { systemInstruction: SYSTEM, tools: [{ functionDeclarations: tools.map(t => ({ name: t.name, description: t.description, parametersJsonSchema: t.input_schema })) }] }
       });
-      const candidate = response.candidates?.[0];
-      const parts = candidate?.content?.parts ?? [];
+      const parts = response.candidates?.[0]?.content?.parts ?? [];
       history.push({ role: "model", parts });
       for (const part of parts) if (part.text) console.log(`\n${part.text}`);
       const calls = parts.filter((p: any) => p.functionCall).map((p: any) => p.functionCall);
@@ -154,7 +150,7 @@ class AnthropicProvider {
         model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514",
         max_tokens: 12000,
         system: SYSTEM,
-        tools,
+        tools: tools as any,
         messages
       });
       const toolResults: ToolResult[] = [];
