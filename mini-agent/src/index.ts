@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import Anthropic from "@anthropic-ai/sdk";
+import Groq from "groq-sdk";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { exec } from "node:child_process";
@@ -111,7 +112,7 @@ class GeminiProvider {
     const history: any[] = [{ role: "user", parts: [{ text: userPrompt }] }];
     for (let step = 1; step <= MAX_STEPS; step++) {
       const response: any = await this.ai.models.generateContent({
-        model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+        model: process.env.GEMINI_MODEL || "gemini-3.6-flash",
         contents: history,
         config: { systemInstruction: SYSTEM, tools: [{ functionDeclarations: tools.map(t => ({ name: t.name, description: t.description, parametersJsonSchema: t.input_schema })) }] }
       });
@@ -177,6 +178,52 @@ class AnthropicProvider {
   }
 }
 
+// Groq uses the OpenAI-style tool schema: { type: "function", function: { name, description, parameters } }
+const openAiTools = tools.map(t => ({
+  type: "function" as const,
+  function: { name: t.name, description: t.description, parameters: t.input_schema }
+}));
+
+class GroqProvider {
+  private client: Groq;
+  constructor(key: string) { this.client = new Groq({ apiKey: key }); }
+
+  async run(userPrompt: string) {
+    const messages: any[] = [
+      { role: "system", content: SYSTEM },
+      { role: "user", content: userPrompt }
+    ];
+    for (let step = 1; step <= MAX_STEPS; step++) {
+      const response = await this.client.chat.completions.create({
+        model: process.env.GROQ_MODEL || "openai/gpt-oss-120b",
+        messages,
+        tools: openAiTools,
+      });
+      const message = response.choices[0].message;
+      if (message.content) console.log(`\n${message.content}`);
+      messages.push(message);
+
+      const calls = message.tool_calls;
+      if (!calls || !calls.length) return message.content || "Done.";
+
+      for (const call of calls) {
+        console.log(`\n→ ${call.function.name}`);
+        let result: string;
+        try {
+          const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
+          result = await execute({ id: call.id, name: call.function.name, input: args });
+          console.log(`✓ ${result.slice(0, 300)}`);
+        } catch (e) {
+          result = `ERROR: ${e instanceof Error ? e.message : String(e)}`;
+          console.log(`✗ ${result}`);
+        }
+        messages.push({ role: "tool", tool_call_id: call.id, content: result });
+      }
+    }
+    throw new Error(`Agent stopped after ${MAX_STEPS} steps. Review the workspace and continue if needed.`);
+  }
+}
+
 async function ask(question: string) {
   const rl = readline.createInterface({ input, output });
   const answer = (await rl.question(question)).trim();
@@ -187,19 +234,21 @@ async function ask(question: string) {
 async function main() {
   await fs.mkdir(ROOT, { recursive: true });
   console.log("\n=== Mini Coding Agent ===\n");
-  console.log("1. Gemini");
-  console.log("2. Anthropic");
-  const choice = await ask("Choose AI provider [1/2]: ");
-  if (!["1", "2"].includes(choice)) throw new Error("Choose 1 or 2.");
-  const envName = choice === "1" ? "GEMINI_API_KEY" : "ANTHROPIC_API_KEY";
+  console.log("1. Gemini (requires billing enabled on your Google account)");
+  console.log("2. Anthropic (paid)");
+  console.log("3. Groq (free, no billing required — recommended for testing)");
+  const choice = await ask("Choose AI provider [1/2/3]: ");
+  if (!["1", "2", "3"].includes(choice)) throw new Error("Choose 1, 2, or 3.");
+  const envName = choice === "1" ? "GEMINI_API_KEY" : choice === "2" ? "ANTHROPIC_API_KEY" : "GROQ_API_KEY";
+  const providerLabel = choice === "1" ? "Gemini" : choice === "2" ? "Anthropic" : "Groq";
   let key = process.env[envName];
-  if (!key) key = await ask(`${choice === "1" ? "Gemini" : "Anthropic"} API key: `);
+  if (!key) key = await ask(`${providerLabel} API key: `);
   if (!key) throw new Error("An API key is required.");
   const request = await ask("\nWhat do you want to build?\n> ");
   if (!request) throw new Error("Describe the work you want done.");
   console.log(`\nWorkspace: ${ROOT}`);
   console.log("Starting agent...\n");
-  const provider = choice === "1" ? new GeminiProvider(key) : new AnthropicProvider(key);
+  const provider = choice === "1" ? new GeminiProvider(key) : choice === "2" ? new AnthropicProvider(key) : new GroqProvider(key);
   await provider.run(request);
   console.log("\n✓ Agent finished. Check the workspace for the completed project.\n");
 }
